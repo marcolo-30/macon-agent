@@ -1,0 +1,9 @@
+--extra-index-url https://__token__:glpat-vPZJMW1-Dse2aXKtcB7u@mlsysops-gitlab.e-ce.uth.gr/api/v4/projects/56/packages/pypi/simple
+
+mlstelemetry
+opentelemetry-exporter-otlp
+opentelemetry-api
+opentelemetry-sdk
+prometheus_client
+spade
+python-dotenv
