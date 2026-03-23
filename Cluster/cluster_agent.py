@@ -1,144 +1,161 @@
-import asyncio
-import multiprocessing
-import random
 import spade
-from spade.agent import Agent
-from spade.behaviour import CyclicBehaviour, PeriodicBehaviour, OneShotBehaviour
-from spade.template import Template
+from spade.behaviour import PeriodicBehaviour, OneShotBehaviour
 from spade.message import Message
+import datetime
+import httpx
+import json
+import logging
+import asyncio
 
-from datetime import datetime, timedelta
+# --- Logger Setup ---
+log = logging.getLogger("cluster_agent")
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
 
 
-class ClusterAgent(Agent):
+class KeepAliveBehaviour(PeriodicBehaviour):
+    async def run(self):
+        msg = Message(to="cluster_agent@192.168.0.35")
+        msg.body = "ping"
+        await self.send(msg)
+        # print("[KeepAlive] Ping sent to keep connection alive.")
 
-    def __init__(self, jid: str, password: str):
-        super().__init__(jid, password)
-        self.check_process_behaviour = None
-        self.launch_fluidity_behaviour = None
-        self.analyze_behaviour = None
-        self.ping_receiver_behaviour = None
-        self.check_inactive_slaves_behaviour = None
-        self.ping_behaviour = None
-        self.deploy_behaviour = None
-        self.monitor_behaviour = None
-        self.lock = None
-        self.subscribers = None
-        self.timeout = timedelta(seconds=60)
-        self.inform_config = None
 
-    class ManageSubscriptionBehaviour(CyclicBehaviour):
-        async def run(self):
-            msg = await self.receive()  # Wait for a subscription message
-            if msg:
-                print(msg.thread)
-                sender = str(msg._sender).split("/")[0]
-                resp = Message(to=sender)  # Instantiate the message
-                resp.set_metadata("performative", "subscription")
-                resp.thread = msg.thread
-                async with self.agent.lock:
-                    if sender not in self.agent.subscribers:
-                        self.agent.subscribers[sender] = True  # Assume true means available
+class MonitorBehaviour(PeriodicBehaviour):
+    async def run(self):
+        # print("--- [Monitor] Running ---")
+        
+        # 1. Get real CPU usage for ALL nodes from Prometheus
+        try:
+            url = f"{self.agent.prometheus_url}/api/v1/query?query={self.agent.prometheus_cpu_query}"
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                results = data.get('data', {}).get('result', [])
+                
+                nodes_cpu = {}
+                for result in results:
+                    node_name = result.get('metric', {}).get('k8s_node_name')
+                    if node_name:
+                        cpu_usage = float(result['value'][1])
+                        nodes_cpu[node_name] = cpu_usage
+                
+                self.agent.knowledge["nodes_cpu"] = nodes_cpu
+                # if not nodes_cpu:
+                #     print("[Monitor] CPU query OK, but no nodes were found in the results.")
 
-                        resp.body = "Subscription succeed "  # Set the message content
-                        await self.send(resp)
-                    else:
-                        print("JID on list already subscribed")
-                        resp.body = "Agent already subscribed "  # Set the message content
-                        await self.send(resp)
+        except Exception as e:
+            print(f"[Monitor] ERROR fetching CPU: {e}")
+            self.agent.knowledge["nodes_cpu"] = {}
 
-    class PingBehaviour(CyclicBehaviour):
-        """
-                A behavior that receives messages and sends responses.
-                This is used to do the heartbeat.
-         """
+        # 2. Get real iterations/second from Prometheus
+        try:
+            url = f"{self.agent.prometheus_url}/api/v1/query?query={self.agent.prometheus_iter_query}"
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                result = data.get('data', {}).get('result', [])
+                if result:
+                    self.agent.knowledge["iter"] = float(result[0]['value'][1])
+                else:
+                    self.agent.knowledge["iter"] = 0.0
+                    # print(f"[Monitor] Iterations query returned no results.")
+        except Exception as e:
+            print(f"[Monitor] ERROR fetching iterations: {e}")
+            self.agent.knowledge["iter"] = 0.0
 
-        async def run(self):
-            """Continuously receive and respond to messages in a cyclic manner."""
-            print("PingBehav running")
+        # nodes_cpu_log = {k: f"{v:.2f}%" for k, v in self.agent.knowledge.get('nodes_cpu', {}).items()}
+        # iter_val = self.agent.knowledge.get('iter', 0.0)
+        # print(f"[Monitor] Metrics updated: nodes_cpu(real)={nodes_cpu_log}  iter(real)={iter_val:.2f}")
 
-            # wait for a message for 10 seconds
-            msg = await self.receive(timeout=10)
-            if msg:
-                print(str(msg._sender).split("/")[0])
-                print(msg.to)
-                print("Ping received with content: {}".format(msg.body))
 
-                # Create a response message
-                resp = Message(to=str(msg._sender).split("/")[0])  # Replace with the actual recipient JID
-                resp.set_metadata("performative", "ping")  # Set the "inform" FIPA performative
-                resp.body = "Response From " + str(msg.to)  # Set the message content
-                print(resp.body)
-                # Send the response message
-                await self.send(resp)
-                print("Callback message sent!\n")
+class AnalyzeBehaviour(PeriodicBehaviour):
+    async def run(self):
+        nodes_cpu = self.agent.knowledge.get("nodes_cpu", {})
+        cpu_to_check = nodes_cpu.get(self.agent.node_to_monitor, 0.0)
+        itr = self.agent.knowledge.get("iter", 0.0)
+        
+        # print(f"[Analyze] Checking node '{self.agent.node_to_monitor}': cpu={cpu_to_check:.2f}%, iter={itr:.2f}")
+
+        if self.agent.migration_in_flight:
+            # print("[Analyze] Migration already in flight. Skipping analysis.")
+            return
+
+        # Hysteresis Logic: only trigger migration if degradation is sustained
+        is_degraded = cpu_to_check > self.agent.cpu_threshold and itr > 0 and itr < (self.agent.baseline_iter * 0.8)
+
+        if is_degraded:
+            if self.agent.degradation_start_time is None:
+                self.agent.degradation_start_time = datetime.datetime.now()
+                # print(f"[Analyze] ⚠️ Degradation detected on '{self.agent.node_to_monitor}'. Starting timer...")
             else:
-                print("Did not received any message after 10 seconds")
+                duration = (datetime.datetime.now() - self.agent.degradation_start_time).total_seconds()
+                # print(f"[Analyze] Degradation ongoing for {duration:.0f} seconds (threshold is {self.agent.degradation_time_threshold}s).")
+                if duration >= self.agent.degradation_time_threshold:
+                    print(f"[Analyze] ‼️ Degradation has been sustained for over {self.agent.degradation_time_threshold}s. Triggering Plan!")
+                    self.agent.migration_in_flight = True
+                    self.agent.degradation_start_time = None 
+                    self.agent.add_behaviour(PlanBehaviour())
+        else:
+            if self.agent.degradation_start_time is not None:
+                # print("[Analyze] ✅ System has recovered. Resetting degradation timer.")
+                self.agent.degradation_start_time = None
+            # else:
+            #     print("[Analyze] ✅ System stable.")
 
-                await asyncio.sleep(10)
 
-    class PingReceiverBehaviour(CyclicBehaviour):
-        async def run(self):
-            msg = await self.receive(timeout=2)  # Wait for a message for 10 seconds
-            if msg:
-                slave_id = str(msg.sender).split("/")[0]
-                now = datetime.now()
-                self.agent.subscribers[slave_id] = now
-                print(f"Received ping from {slave_id} at {now}.")
+class PlanBehaviour(OneShotBehaviour):
+    async def run(self):
+        print("[Plan] selecting target node...")
+        target_node = "r3-node"
+        print(f"[Plan] target node selected: {target_node}")
+        self.agent.knowledge["target_node"] = target_node
+        self.agent.add_behaviour(ExecuteBehaviour())
 
-    class CheckInactiveSlavesBehaviour(PeriodicBehaviour):
-        async def run(self):
-            # Get the current time
-            now = datetime.now()
 
-            # Initialize an empty list to hold inactive subscribers
-            inactive_slaves = []
+class ExecuteBehaviour(OneShotBehaviour):
+    async def run(self):
+        target = self.agent.knowledge.get("target_node", "unknown")
+        print(f"[Execute] migrating pod → {target}")
+        await asyncio.sleep(5)
+        print(f"[Execute] ✅ pod migrated to {target}")
+        self.agent.knowledge["current_node"] = target
+        self.agent.migration_in_flight = False
+        # print("[Execute] migration_in_flight released — back to monitoring")
 
-            # Iterate through the subscribers dictionary
-            for slave_id, last_ping in self.agent.subscribers.items():
-                # Check if last_ping is a datetime object and if the time since last ping is greater than the timeout
-                if isinstance(last_ping, datetime) and (
-                        now - last_ping) > self.agent.timeout:  # time out is defined at the cluster agent
-                    # Add the slave_id to the inactive list
-                    inactive_slaves.append(slave_id)
 
-            for slave_id in inactive_slaves:
-                print("_____________________________________________INACTIVE NODE______________________")
-                print(f"Agent {slave_id} is inactive.")
-                print("_____________________________________________INACTIVE NODE______________________")
-
+class ClusterAgent(spade.agent.Agent):
     async def setup(self):
-        print("Starting cluster agent ... ")
+        # print(f"[Agent] starting — {str(self.jid)}")
+        self.knowledge = {}
+        self.migration_in_flight = False
+        self.degradation_start_time = None # For hysteresis
 
-        self.subscribers = {}
-        self.lock = asyncio.Lock()
+        # --- Configuration ---
+        self.prometheus_url = "http://192.168.0.35:9090"
+        self.node_to_monitor = "vm1node"
+        self.prometheus_iter_query = 'main_app_iterations_per_sec{service="main-app", cluster="clus1"}'
+        self.prometheus_cpu_query = '100 * sum by (cluster, k8s_node_name) (rate(system_cpu_time_seconds_total{job="otel-collectors", state!="idle"}[1m])) / count by (cluster, k8s_node_name) (system_cpu_time_seconds_total{job="otel-collectors", state="idle"})'
+        
+        # --- Policy Thresholds ---
+        self.cpu_threshold = 80.0
+        self.baseline_iter = 1000.0
+        self.degradation_time_threshold = 120 # seconds (2 minutes)
 
-        # ---------------Manage subscription-----------------------
+        self.add_behaviour(KeepAliveBehaviour(period=30))
+        self.add_behaviour(MonitorBehaviour(period=15))
+        start_analyze = datetime.datetime.now() + datetime.timedelta(seconds=5)
+        self.add_behaviour(AnalyzeBehaviour(period=15, start_at=start_analyze))
 
-        sub_template = Template()
-        sub_template.set_metadata("performative", "subscribe")
-        agent_sub = self.ManageSubscriptionBehaviour()
-        self.add_behaviour(agent_sub, sub_template)
-
-        ping_template = Template()
-        ping_template.set_metadata("performative", "ping")
-        self.ping_behaviour = self.PingBehaviour()
-        self.add_behaviour(self.ping_behaviour, ping_template)
-
-        self.ping_receiver_behaviour = self.PingReceiverBehaviour()
-        self.add_behaviour(self.ping_receiver_behaviour)
-
-        self.check_inactive_slaves_behaviour = self.CheckInactiveSlavesBehaviour(period=5)
-        self.add_behaviour(self.check_inactive_slaves_behaviour)
+        # print("[Agent] all behaviours added")
 
 
 async def main():
-    cluster_agent = ClusterAgent("cluster1@192.168.1.10", "1234")
-    await cluster_agent.start(auto_register=True)
-    print("Cluster Agent Started")
-
-    await spade.wait_until_finished(cluster_agent)
-    print("Agents finished")
+    agent = ClusterAgent("cluster_agent@192.168.0.35", "123")
+    await agent.start()
+    print("[Agent] running — Ctrl+C to stop")
+    await spade.wait_until_finished(agent)
 
 
 if __name__ == "__main__":
