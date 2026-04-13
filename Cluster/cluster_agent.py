@@ -78,8 +78,8 @@ class MonitorBehaviour(PeriodicBehaviour):
 
 class AnalyzeBehaviour(PeriodicBehaviour):
     
-    def trigger_migration(self, target_node):
-        print(f"[Analyze] ‼️ Triggering migration from '{self.agent.current_node}' to '{target_node}'!")
+    def trigger_migration(self, target_node, reason):
+        print(f"[Analyze] ‼️ {reason} Triggering migration from '{self.agent.current_node}' to '{target_node}'!")
         self.agent.migration_in_flight = True
         self.agent.knowledge["target_node"] = target_node
         self.agent.add_behaviour(PlanBehaviour())
@@ -91,44 +91,19 @@ class AnalyzeBehaviour(PeriodicBehaviour):
         nodes_cpu = self.agent.knowledge.get("nodes_cpu", {})
         current_qos = self.agent.knowledge.get("qos", 0.0)
         
-        # Calculate the score of the current state
-        current_node_cost = self.agent.node_costs.get(self.agent.current_node, 999)
-        current_score = current_qos - current_node_cost
-        
-        print(f"[Analyze] Current state: node='{self.agent.current_node}', qos={current_qos:.2f}, cost={current_node_cost}, score={current_score:.2f}")
+        print(f"[Analyze] Current state: app is on '{self.agent.current_node}'. QoS is {current_qos:.2f} (Threshold: {self.agent.qos_threshold}%)")
 
-        # --- ESCAPE LOGIC: Leave if current node is degraded ---
+        # If app is on the optimal node (r3-node), check if QoS has dropped
         if self.agent.current_node == "r3-node":
-            cpu_r3_node = nodes_cpu.get("r3-node", 0.0)
-            if cpu_r3_node > self.agent.cpu_threshold:
-                if self.agent.degradation_start_time is None: self.agent.degradation_start_time = datetime.datetime.now()
-                else:
-                    duration = (datetime.datetime.now() - self.agent.degradation_start_time).total_seconds()
-                    if duration >= self.agent.degradation_time_threshold:
-                        self.agent.degradation_start_time = None
-                        print("[Analyze] Primary node 'r3-node' is degraded. Escaping to 'vm1node'.")
-                        self.trigger_migration(target_node="vm1node")
-                        return
-            else: self.agent.degradation_start_time = None
-
-        # --- OPTIMIZATION LOGIC: Always try to return to the lowest-cost node ---
+            if current_qos < self.agent.qos_threshold:
+                self.trigger_migration(target_node="vm1node", reason=f"QoS dropped below {self.agent.qos_threshold}%")
+        
+        # If app is on the backup node (vm1node), check if it's safe to return
         elif self.agent.current_node == "vm1node":
             cpu_r3_node = nodes_cpu.get("r3-node", 100.0)
-            # Check if it's safe to return
+            print(f"[Analyze] Checking return condition. CPU of 'r3-node' is {cpu_r3_node:.2f}% (Threshold: {self.agent.return_cpu_threshold}%)")
             if cpu_r3_node < self.agent.return_cpu_threshold:
-                # Calculate the score of the potential destination state
-                qos_at_r3_node = 100.0 # Ideal QoS
-                cost_at_r3_node = self.agent.node_costs.get("r3-node", 0)
-                destination_score = qos_at_r3_node - cost_at_r3_node
-                
-                benefit = destination_score - current_score - self.agent.migration_cost
-                
-                print(f"[Analyze] Considering return to 'r3-node'. Benefit: {destination_score:.2f} (dest_score) - {current_score:.2f} (curr_score) - {self.agent.migration_cost} = {benefit:.2f}")
-                if benefit > 0:
-                    self.trigger_migration(target_node="r3-node")
-                    return
-        
-        print("[Analyze] ✅ No action required.")
+                self.trigger_migration(target_node="r3-node", reason=f"Optimal node 'r3-node' is free.")
 
 
 class PlanBehaviour(OneShotBehaviour):
@@ -165,8 +140,7 @@ class ClusterAgent(spade.agent.Agent):
     async def setup(self):
         self.knowledge = {}
         self.migration_in_flight = False
-        self.degradation_start_time = None
-        self.current_node = "unknown"
+        self.current_node = "r3-node" # Assume it starts on the optimal node
 
         # --- Configuration ---
         self.prometheus_url = "http://192.168.0.35:9090"
@@ -180,14 +154,8 @@ class ClusterAgent(spade.agent.Agent):
         self.prometheus_qos_query = 'main_app_qos{service="main-app", cluster="clus1"}'
         
         # --- Policy ---
-        self.node_costs = {
-            "r3-node": 0,    # Optimal node, zero cost
-            "vm1node": 50    # Backup node, high cost
-        }
-        self.cpu_threshold = 80.0
-        self.degradation_time_threshold = 120
-        self.return_cpu_threshold = 30.0
-        self.migration_cost = 20.0
+        self.qos_threshold = 80.0 # If QoS on r3-node drops below this, migrate
+        self.return_cpu_threshold = 50.0 # If r3-node CPU is below this, it's safe to return
 
         self.add_behaviour(KeepAliveBehaviour(period=30))
         self.add_behaviour(MonitorBehaviour(period=15))
