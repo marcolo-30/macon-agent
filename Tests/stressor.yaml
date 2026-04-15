@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpu-wave
+  namespace: myapp
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: r3-node
+  containers:
+  - name: cpu-wave
+    image: python:3.12-slim
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+    command: ["python3", "-c"]
+    args:
+    - |
+      import time, math, multiprocessing
+      CYCLE_ON, CYCLE_OFF, CORES = 300, 300, 4
+      def burn(stop_event):
+          while not stop_event.is_set(): sum(math.sqrt(i) * math.log(i + 1) for i in range(200_000))
+      print(f"[cpu-wave] {CORES} procs | ON={CYCLE_ON}s OFF={CYCLE_OFF}s", flush=True)
+      while True:
+          # Start with REST period
+          print(f"[cpu-wave] --- REST {CYCLE_OFF}s", flush=True)
+          time.sleep(CYCLE_OFF)
+
+          # Then, BURNING period
+          stop = multiprocessing.Event()
+          procs = [multiprocessing.Process(target=burn, args=(stop,)) for _ in range(CORES)]
+          for p in procs: p.start()
+          print(f"[cpu-wave] >>> BURNING {CYCLE_ON}s", flush=True)
+          time.sleep(CYCLE_ON)
+          stop.set()
+          for p in procs: p.join()

@@ -1,0 +1,14 @@
+{
+  "test_number": 7,
+  "policy_name": "threshold-test",
+  "test_start_timestamp": "2026-04-14T23:05:23.428251",
+  "test_end_timestamp": "2026-04-15T00:05:24.089624",
+  "test_duration_seconds": 3601,
+  "metrics": {
+    "migration_count": 17,
+    "time_on_r3_node_seconds": 1997,
+    "time_on_vm1node_seconds": 1604,
+    "qos_violation_seconds": 260,
+    "downtime_seconds": 22.28
+  }
+}
