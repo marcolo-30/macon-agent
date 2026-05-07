@@ -10,8 +10,8 @@ from kubernetes import client, config
 
 # --- Configuration ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-K8S_NAMESPACE = "myapp"
-POD_LABEL_SELECTOR = "app=main-app"
+K8S_NAMESPACE = "smartcity"
+POD_LABEL_SELECTOR = "app=traffic-processor"
 STRESSOR_POD_NAME = "cpu-wave"
 OPTIMAL_NODE = "r3-node"
 STRESSOR_YAML_PATH = os.path.join(SCRIPT_DIR, "stressor.yaml")
@@ -65,7 +65,7 @@ def ensure_pod_location(api_client, target_node, kube_context):
             print(f"[INFO] Pod is correctly located on '{target_node}'.")
             break
         print(f"[WARN] Pod is on '{current_node}', moving it to '{target_node}'...")
-        patch_cmd = ["patch", "deployment", "main-app", "-n", K8S_NAMESPACE, "-p", f'{{"spec":{{"template":{{"spec":{{"nodeSelector":{{"kubernetes.io/hostname":"{target_node}"}}}}}}}}}}']
+        patch_cmd = ["patch", "deployment", "traffic-processor", "-n", K8S_NAMESPACE, "-p", f'{{"spec":{{"template":{{"spec":{{"nodeSelector":{{"kubernetes.io/hostname":"{target_node}"}}}}}}}}}}']
         run_kubectl_command(patch_cmd, kube_context)
         time.sleep(15)
     print("--- Pre-condition MET ---")
@@ -98,7 +98,7 @@ async def run_single_test(test_number, args, api_client):
 
         current_node, qos_results, is_healthy = await asyncio.gather(
             asyncio.to_thread(get_pod_node, api_client),
-            query_prometheus(args.prometheus_url, 'main_app_qos{service="main-app", cluster="clus1"}'),
+            query_prometheus(args.prometheus_url, 'qos_composite{service=~"traffic-processor.*"}'),
             check_health(health_check_url)
         )
 
@@ -162,9 +162,9 @@ async def main():
     parser.add_argument("--kube-context", type=str, default="clus1")
     parser.add_argument("--kubeconfig-path", type=str, default="../Cluster/kubeconfig")
     parser.add_argument("--prometheus-url", type=str, default="http://192.168.0.35:9090")
-    parser.add_argument("--qos-threshold", type=float, default=80.0)
+    parser.add_argument("--qos-threshold", type=float, default=0.80)  # escala [0.0–1.0]
     parser.add_argument("--node-ip", type=str, required=True, help="IP of a k8s node to reach the NodePort service.")
-    parser.add_argument("--node-port", type=int, default=30007, help="NodePort of the main-app health check service.")
+    parser.add_argument("--node-port", type=int, default=30080, help="NodePort of the main-app health check service.")
     args = parser.parse_args()
 
     results_dir = os.path.join(SCRIPT_DIR, "results")
