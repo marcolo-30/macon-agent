@@ -6,6 +6,7 @@ import json
 import asyncio
 import os
 from kubernetes import client, config
+import joblib
 
 # --- Configuration ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -49,7 +50,7 @@ class MonitorBehaviour(PeriodicBehaviour):
     # ── Policy hot-reload ──────────────────────────────────────────────────────
     def check_for_policy_change(self):
         try:
-            with open(self.agent.policy_conf_path, 'r') as f:
+            with open(self.agent.policy_conf_path, 'r', encoding='utf-8') as f:
                 policy_filename = f.read().strip()
 
             if not policy_filename:
@@ -68,7 +69,7 @@ class MonitorBehaviour(PeriodicBehaviour):
                 reason = "nuevo archivo" if policy_filename != self.agent.current_policy_filename \
                          else "archivo editado"
                 print(f"[Monitor] 🧠 Policy reload ({reason}): '{policy_filename}'...")
-                with open(policy_path, 'r') as f:
+                with open(policy_path, 'r', encoding='utf-8') as f:
                     code = f.read()
                 scope = {'Policy': Policy}
                 exec(code, scope)
@@ -256,8 +257,8 @@ class ExecuteBehaviour(OneShotBehaviour):
             None, self.patch_deployment, target_node
         )
         if success:
-            print(f"[Execute] ✅ Migración a '{target_node}' iniciada. Cooldown 45s...")
-            await asyncio.sleep(45)
+            print(f"[Execute] ✅ Migración a '{target_node}' iniciada. Cooldown 20s...")
+            await asyncio.sleep(20)
         else:
             print(f"[Execute] ❌ Falló la migración a '{target_node}'.")
 
@@ -272,7 +273,7 @@ class ClusterAgent(spade.agent.Agent):
         self.knowledge              = {}
         self.migration_in_flight   = False
         self.current_node          = "r3-node"
-
+        # ml_model removed — each ML policy loads its own model via exec()
         # Policy hot-reload state
         self.current_policy_filename = ""
         self.current_policy_mtime    = 0.0
@@ -299,10 +300,10 @@ class ClusterAgent(spade.agent.Agent):
 
         self.policy = PassivePolicy(self)
         print("[Agent] Iniciado con PassivePolicy por defecto.")
-        self.add_behaviour(MonitorBehaviour(period=15))
+        self.add_behaviour(MonitorBehaviour(period=5))
         self.add_behaviour(AnalyzeBehaviour(
             start_at=datetime.datetime.now() + datetime.timedelta(seconds=5),
-            period=15,
+            period=5,
         ))
 
 

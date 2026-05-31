@@ -1,0 +1,19 @@
+Policy Comparison Report
+============================================================
+Date     : 20260516_2122
+SLA      : QoS >= 70.0
+
+Metric                               weights
+--------------------------------------------
+Mean QoS (0-100)                       97.04
+Min QoS                                27.91
+P10 QoS (worst 10%)                    99.21
+% time below SLA                         5.7
+Migrations triggered                      12
+Avg QoS during CPU burn                96.29
+Avg QoS during CPU idle                98.55
+Avg recovery time (s)                   29.4
+SLA violation events                       7
+
+Node distribution:
+  weights     : {'vm1node': 52.0, 'r3-node': 48.0}

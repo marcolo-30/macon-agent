@@ -1,0 +1,20 @@
+QoS Regressor — Training Report
+==================================================
+
+Target   : qos (0-100 scale)
+Features : 4
+
+RMSE     : 2.87
+MAE      : 1.24
+R²       : 0.9939
+CV R²    : 0.9921 ± 0.0006
+
+Feature Importances:
+  cpu_r3                       0.9432
+  cpu_r3_trend                 0.0557
+  cpu_vm1                      0.0006
+  cpu_vm1_trend                0.0005
+
+Thresholds:
+  migrate r3→vm1 : predicted_qos < 70.0
+  return  vm1→r3 : predicted_qos > 80.0

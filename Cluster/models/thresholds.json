@@ -1,0 +1,5 @@
+{
+  "migrate_threshold": 70.0,
+  "return_threshold": 80.0,
+  "description": "migrate r3\u2192vm1 when predicted_qos_r3 < migrate_threshold; return vm1\u2192r3 when predicted_qos_r3 > return_threshold"
+}

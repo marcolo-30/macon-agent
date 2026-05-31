@@ -1,0 +1,22 @@
+Policy Comparison Report
+============================================================
+Date     : 20260517_0247
+SLA      : QoS >= 70.0
+
+Metric                               passive     threshold       weights            ml
+--------------------------------------------------------------------------------------
+Mean QoS (0-100)                       60.05         98.71         97.25         99.65
+Min QoS                                19.37         52.68          33.4         48.66
+P10 QoS (worst 10%)                    19.89         100.0         100.0         100.0
+% time below SLA                        51.9           2.9           5.6           0.6
+Migrations triggered                       0            13            11            21
+Avg QoS during CPU burn                26.04         99.22          96.5         99.75
+Avg QoS during CPU idle                    -         98.37         99.87         99.73
+Avg recovery time (s)                  313.5          15.0          25.0          20.0
+SLA violation events                       6             7             8             1
+
+Node distribution:
+  passive     : {'r3-node': 100.0}
+  threshold   : {'r3-node': 44.5, 'vm1node': 55.5}
+  weights     : {'r3-node': 48.8, 'vm1node': 51.2}
+  ml          : {'r3-node': 19.5, 'vm1node': 80.5}

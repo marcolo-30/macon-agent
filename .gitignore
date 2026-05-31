@@ -1,6 +1,6 @@
 # Test results
-Tests/results/
-results/
+/Tests/results/
+/results/
 
 # Python
 __pycache__/
@@ -18,3 +18,15 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Ignore specific document types inside the tests folder
+/tests/*.pdf
+/tests/*.tex
+/tests/*.xls
+/tests/*.xlsx
+
+/tests/*.docx
+/tests/*.png
+/*.docx
+/*.png
+/tests/char*

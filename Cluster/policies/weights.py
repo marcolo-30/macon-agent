@@ -1,111 +1,90 @@
 # File: weights.py
-# Política DELIBERADA: migra solo cuando la degradación es compound y sostenida.
-# Filosofía: AND logic + cooldowns de permanencia mínima.
-# Resultado esperado: 4-6 migraciones por hora, violations moderadas (300-600s).
+# WEIGHTED PRESSURE POLICY  (fixed for QoS 0-100 scale)
 #
-# Mecanismo de cooldowns (estado en agent.knowledge):
-#   _w_migrated_at  → timestamp de última salida de r3. Bloquea retorno por MIN_ON_VM1_S.
-#   _w_returned_at  → timestamp de último retorno a r3. Bloquea re-migración por MIN_ON_R3_S.
+# MIGRATE from r3:
+#   Weighted degradation pressure (QoS + CPU + latency) > MIGRATE_TRIGGER
 #
-# Métricas usadas (definidas en metrics.conf):
-#   qos               → composite QoS score [0.0-1.0]
-#   qos_latency_score → latency sub-score   [0.0-1.0]
-#   nodes_cpu         → {node_name: cpu_%}
+# RETURN to r3:
+#   r3 pressure < RETURN_TRIGGER  (hysteresis gap prevents oscillation)
+#
+# Metrics used (defined in metrics.conf):
+#   qos               -> composite QoS [0-100]   ← normalised to [0-1] internally
+#   qos_latency_score -> latency sub-score [0-1]
+#   nodes_cpu         -> {node_name: cpu_%}
 
-import time
+# ── Migration weights (must sum to 1.0) ───────────────────────────────────────
+W_QOS     = 0.50   # composite QoS (primary service-quality signal)
+W_CPU     = 0.30   # node CPU usage
+W_LATENCY = 0.20   # latency sub-score
 
-# Permanencia mínima en cada nodo antes de permitir la siguiente migración.
-# Con ciclos de stressor 300s-BURN / 300s-REST (600s total):
-#   MIN_ON_VM1_S = 600  → se salta al menos un ciclo completo antes de volver
-#   MIN_ON_R3_S  = 450  → tras volver, espera > 1 REST antes de migrar de nuevo
-MIN_ON_VM1_S = 600   # segundos mínimos en vm1node tras migrar
-MIN_ON_R3_S  = 450   # segundos mínimos en r3-node tras volver
-
-# Umbrales del trigger (condición AND — ambos deben cumplirse)
-DEGRADE_QOS_THRESHOLD = 0.85   # QoS composite debe caer bajo esto
-OVERLOAD_CPU_NODE     = 72.0   # CPU% del nodo r3 debe superar esto
-
-# Umbral de retorno
-RETURN_R3_CPU_MAX     = 30.0   # r3-node debe estar por debajo para considerar vuelta
+CPU_NORMAL      = 40.0  # % CPU considered "no load"
+MIGRATE_TRIGGER = 0.35  # pressure score threshold to trigger migration  [0-1]
+RETURN_TRIGGER  = 0.15  # pressure score to allow return (hysteresis gap) [0-1]
 
 
 class CustomPolicy(Policy):
 
+    # ── Weighted pressure score ───────────────────────────────────────────────
+    def _pressure_score(self, qos_100, node_cpu, latency_score):
+        """
+        All inputs normalised to [0,1] before weighting.
+          qos_100      : QoS composite  [0-100]  → normalised to [0,1]
+          node_cpu     : node CPU usage [0-100 %]
+          latency_score: latency score  [0-1]
+        Returns total pressure [0-1] and individual stress components.
+        """
+        qos_norm       = qos_100 / 100.0
+        qos_stress     = max(0.0, 1.0 - qos_norm)
+        cpu_stress     = max(0.0, (node_cpu - CPU_NORMAL) / (100.0 - CPU_NORMAL))
+        latency_stress = max(0.0, 1.0 - latency_score)
+
+        score = W_QOS * qos_stress + W_CPU * cpu_stress + W_LATENCY * latency_stress
+        return round(score, 4), qos_stress, cpu_stress, latency_stress
+
+    # ── Main decision ─────────────────────────────────────────────────────────
     def should_migrate(self):
-        """Decide SI hay que migrar. Lógica AND + cooldowns de permanencia."""
         current_node = self.agent.current_node
         knowledge    = self.agent.knowledge
-        now          = time.time()
 
-        # ── Desde r3-node: evaluar si migrar a vm1node ─────────────────────────
+        # ── On r3-node: migrate when pressure exceeds trigger ─────────────────
         if current_node == "r3-node":
-            # Cooldown: no migrar demasiado pronto tras un retorno reciente
-            returned_at = knowledge.get("_w_returned_at", 0.0)
-            elapsed_on_r3 = now - returned_at
-            if elapsed_on_r3 < MIN_ON_R3_S:
-                wait = MIN_ON_R3_S - elapsed_on_r3
-                print(f"[Analyze] weights.py: En r3, cooldown retorno: {wait:.0f}s restantes → esperar")
-                return False
+            qos           = knowledge.get("qos")               if knowledge.get("qos")               is not None else 100.0
+            latency_score = knowledge.get("qos_latency_score") if knowledge.get("qos_latency_score") is not None else 1.0
+            nodes_cpu     = knowledge.get("nodes_cpu") or {}
+            node_cpu      = nodes_cpu.get("r3-node", 0.0)
 
-            qos       = knowledge.get("qos")       if knowledge.get("qos")       is not None else 1.0
-            nodes_cpu = knowledge.get("nodes_cpu") or {}
-            node_cpu  = nodes_cpu.get("r3-node", 0.0)
+            score, qs, cs, ls = self._pressure_score(qos, node_cpu, latency_score)
 
-            # AND: la degradación debe ser compound (QoS baja Y nodo sobrecargado)
-            is_degraded   = qos      < DEGRADE_QOS_THRESHOLD
-            is_overloaded = node_cpu > OVERLOAD_CPU_NODE
+            print(f"[Analyze] weights: pressure={score:.3f} "
+                  f"[qos_stress={qs:.2f}x{W_QOS} + cpu_stress={cs:.2f}x{W_CPU} + "
+                  f"lat_stress={ls:.2f}x{W_LATENCY}] trigger={MIGRATE_TRIGGER}")
 
-            if is_degraded and is_overloaded:
-                print(f"[Analyze] weights.py: QoS={qos:.3f} < {DEGRADE_QOS_THRESHOLD}, "
-                      f"node_cpu={node_cpu:.1f}% > {OVERLOAD_CPU_NODE}% → MIGRAR (AND trigger)")
-                knowledge["_w_migrated_at"] = now   # registrar momento de salida
+            if score > MIGRATE_TRIGGER:
+                print(f"[Analyze] weights: {score:.3f} > {MIGRATE_TRIGGER} → MIGRATE to vm1")
                 return True
-
-            print(f"[Analyze] weights.py: QoS={qos:.3f}, node_cpu={node_cpu:.1f}% "
-                  f"(degraded={is_degraded}, overloaded={is_overloaded}) → mantener en r3")
             return False
 
-        # ── Desde vm1node: evaluar si volver a r3-node ─────────────────────────
+        # ── On vm1node: return when r3 pressure drops below return trigger ────
         elif current_node == "vm1node":
-            # Cooldown: no volver antes de MIN_ON_VM1_S (asegura al menos un ciclo completo)
-            migrated_at   = knowledge.get("_w_migrated_at", 0.0)
-            elapsed_on_vm1 = now - migrated_at
-            if elapsed_on_vm1 < MIN_ON_VM1_S:
-                wait = MIN_ON_VM1_S - elapsed_on_vm1
-                print(f"[Analyze] weights.py: En vm1, cooldown salida: {wait:.0f}s restantes → esperar")
-                return False
+            nodes_cpu     = knowledge.get("nodes_cpu") or {}
+            node_cpu_r3   = nodes_cpu.get("r3-node", 100.0)
+            qos           = knowledge.get("qos")               if knowledge.get("qos")               is not None else 100.0
+            latency_score = knowledge.get("qos_latency_score") if knowledge.get("qos_latency_score") is not None else 1.0
 
-            nodes_cpu = knowledge.get("nodes_cpu") or {}
-            r3_cpu    = nodes_cpu.get("r3-node", 100.0)
+            r3_pressure, _, _, _ = self._pressure_score(qos, node_cpu_r3, latency_score)
 
-            # Condición 1: r3 debe estar verdaderamente libre
-            if r3_cpu >= RETURN_R3_CPU_MAX:
-                print(f"[Analyze] weights.py: r3_cpu={r3_cpu:.1f}% >= {RETURN_R3_CPU_MAX}% → r3 aún ocupado")
-                return False
+            print(f"[Analyze] weights: r3_pressure={r3_pressure:.3f} "
+                  f"(return_trigger={RETURN_TRIGGER})")
 
-            # Condición 2: análisis coste-beneficio (escala [0,1])
-            current_qos   = knowledge.get("qos")               if knowledge.get("qos")               is not None else 0.0
-            latency_score = knowledge.get("qos_latency_score") if knowledge.get("qos_latency_score") is not None else current_qos
-
-            cost_current      = self.agent.node_costs.get(current_node, 1.0)   # vm1: 0.50
-            current_score     = current_qos - cost_current
-
-            expected_qos_r3   = min(1.0, latency_score + 0.10)                # r3 suele ser más rápido
-            destination_score = expected_qos_r3 - self.agent.node_costs.get("r3-node", 0.0)
-
-            benefit = destination_score - current_score - self.agent.migration_cost
-            print(f"[Analyze] weights.py: r3_cpu={r3_cpu:.1f}%, benefit={benefit:.3f} "
-                  f"(dest={destination_score:.2f}, curr={current_score:.2f}, "
-                  f"migcost={self.agent.migration_cost:.2f}) → {'VOLVER' if benefit > 0 else 'quedarse en vm1'}")
-
-            if benefit > 0:
-                knowledge["_w_returned_at"] = now   # registrar momento de retorno
+            if r3_pressure < RETURN_TRIGGER:
+                print(f"[Analyze] weights: r3 recovered ({r3_pressure:.3f} < {RETURN_TRIGGER}) → RETURN to r3")
                 return True
+            return False
 
         return False
 
+    # ── Target node selection ─────────────────────────────────────────────────
     def select_target_node(self):
-        """Selecciona el nodo destino."""
         if self.agent.current_node == "r3-node":
             return "vm1node"
         else:
@@ -113,6 +92,7 @@ class CustomPolicy(Policy):
 
     def get_reason(self, target_node):
         if target_node == "vm1node":
-            return "Degradación compound: QoS bajo Y CPU de nodo sobrecargado (AND trigger)."
+            return (f"Weighted pressure={MIGRATE_TRIGGER} exceeded "
+                    f"(QoS x{W_QOS} + CPU x{W_CPU} + Latency x{W_LATENCY}).")
         else:
-            return "Cooldown cumplido + análisis coste-beneficio favorable → retorno deliberado a nodo óptimo."
+            return f"r3 pressure dropped below {RETURN_TRIGGER} — safe to return."

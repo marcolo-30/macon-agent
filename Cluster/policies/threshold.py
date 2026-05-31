@@ -10,7 +10,7 @@
 
 class CustomPolicy(Policy):
     # Umbrales locales — más agresivos que los defaults del agente
-    MIGRATE_QOS_THRESHOLD     = 0.85   # (agent default: 0.80) — dispara antes
+    MIGRATE_QOS_THRESHOLD     = 85.0   # (escala 0-100) — dispara antes
     MIGRATE_LATENCY_THRESHOLD = 0.35   # latencia ya sufriendo
     RETURN_CPU_THRESHOLD      = 55.0   # % CPU r3-node para volver (agent default: 50%)
 
@@ -20,7 +20,7 @@ class CustomPolicy(Policy):
         current_node = self.agent.current_node
 
         if current_node == "r3-node":
-            qos           = knowledge.get("qos")           if knowledge.get("qos")           is not None else 1.0
+            qos           = knowledge.get("qos")           if knowledge.get("qos")           is not None else 100.0
             latency_score = knowledge.get("qos_latency_score") if knowledge.get("qos_latency_score") is not None else 1.0
 
             # OR: basta con que falle UNA condición para migrar

@@ -1,0 +1,65 @@
+{
+  "passive": {
+    "samples": 719,
+    "mean_qos": 60.05,
+    "min_qos": 19.37,
+    "p10_qos": 19.89,
+    "pct_below_sla": 51.9,
+    "migration_count": 0,
+    "node_distribution": {
+      "r3-node": 100.0
+    },
+    "avg_qos_burn": 26.04,
+    "avg_qos_idle": null,
+    "avg_recovery_s": 313.5,
+    "n_violations": 6
+  },
+  "threshold": {
+    "samples": 719,
+    "mean_qos": 98.71,
+    "min_qos": 52.68,
+    "p10_qos": 100.0,
+    "pct_below_sla": 2.9,
+    "migration_count": 13,
+    "node_distribution": {
+      "r3-node": 44.5,
+      "vm1node": 55.5
+    },
+    "avg_qos_burn": 99.22,
+    "avg_qos_idle": 98.37,
+    "avg_recovery_s": 15.0,
+    "n_violations": 7
+  },
+  "weights": {
+    "samples": 719,
+    "mean_qos": 97.25,
+    "min_qos": 33.4,
+    "p10_qos": 100.0,
+    "pct_below_sla": 5.6,
+    "migration_count": 11,
+    "node_distribution": {
+      "r3-node": 48.8,
+      "vm1node": 51.2
+    },
+    "avg_qos_burn": 96.5,
+    "avg_qos_idle": 99.87,
+    "avg_recovery_s": 25.0,
+    "n_violations": 8
+  },
+  "ml": {
+    "samples": 719,
+    "mean_qos": 99.65,
+    "min_qos": 48.66,
+    "p10_qos": 100.0,
+    "pct_below_sla": 0.6,
+    "migration_count": 21,
+    "node_distribution": {
+      "r3-node": 19.5,
+      "vm1node": 80.5
+    },
+    "avg_qos_burn": 99.75,
+    "avg_qos_idle": 99.73,
+    "avg_recovery_s": 20.0,
+    "n_violations": 1
+  }
+}
