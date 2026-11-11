@@ -1,88 +1,120 @@
-# Anatomía del `cluster_agent.py`
+# Anatomy of `cluster_agent.py`
 
-Este documento describe la arquitectura y el flujo de trabajo del `cluster_agent.py`, un agente autónomo basado en el ciclo de control **MAPE-K** (Monitor, Analyze, Plan, Execute over a Knowledge base) y construido sobre la plataforma de agentes **SPADE**.
+This document explains how `cluster_agent.py` is built and how it works. The agent implements a **MAPE-K** control loop (Monitor, Analyze, Plan, Execute over a shared Knowledge base) on top of the **SPADE** agent platform.
 
-El objetivo principal del agente es monitorizar el estado de una aplicación (`main-app`) en un clúster de Kubernetes y migrarla entre nodos para optimizar su rendimiento o escapar de un entorno degradado.
+Its goal is to watch the state of an application (`main-app`) in a Kubernetes cluster and migrate it between nodes, either to improve its performance or to escape a degraded node.
 
----
-
-## 1. Estado y Memoria del Agente (La "K" de MAPE-K)
-
-La memoria del agente reside en las variables de instancia de la clase `ClusterAgent`. La más importante es `self.knowledge`, una base de conocimiento compartida por todos los comportamientos.
-
-### `ClusterAgent.setup()`
-Aquí se inicializa el estado del agente:
-
-- **`self.knowledge` (dict)**: Un diccionario que funciona como la **memoria a corto plazo** del agente. Contiene las métricas más recientes del entorno.
-  - `knowledge['nodes_cpu']`: Un diccionario con el uso de CPU de cada nodo del clúster (e.g., `{'r3-node': 85.1, 'vm1node': 44.2}`).
-  - `knowledge['qos']`: El valor numérico de la métrica `main_app_qos`.
-  - `knowledge['target_node']`: El nodo al que se ha decidido migrar. Lo escribe el `AnalyzeBehaviour` y lo lee el `PlanBehaviour`.
-
-- **`self.current_node` (str)**: La **creencia** del agente sobre en qué nodo se encuentra actualmente la aplicación. Se inicializa a `"unknown"` y el `MonitorBehaviour` se encarga de verificar y corregir esta creencia en cada ciclo.
-
-- **`self.migration_in_flight` (bool)**: Una bandera o "lock" crucial. Se pone a `True` cuando se inicia una migración y a `False` cuando termina. Evita que el agente intente iniciar una nueva migración mientras otra ya está en curso.
-
-- **Parámetros de Configuración y Política**:
-  - `prometheus_url`, `namespace`, `deployment_to_migrate`, etc.
-  - `qos_threshold`, `return_cpu_threshold`: Los umbrales que definen la política de decisión del agente.
+For a high-level overview and usage instructions, see the [README](../README.md).
 
 ---
 
-## 2. Los Comportamientos (`Behaviours`)
+## 1. State and memory (the "K" in MAPE-K)
 
-El ciclo MAPE se implementa a través de una serie de `behaviours` de SPADE que se comunican a través de la memoria del agente.
+The agent's memory lives in the instance variables of the `ClusterAgent` class. The most important one is `self.knowledge`, a knowledge base shared by every behaviour.
 
-### `MonitorBehaviour` (Monitor)
-- **Tipo**: `PeriodicBehaviour` (se ejecuta cada 15 segundos).
-- **Objetivo**: **Percibir el estado del mundo**. Es los "sentidos" del agente.
-- **¿Qué hace?**:
-  1.  **Propiocepción (Saber dónde está)**: Llama a la API de Kubernetes para obtener la ubicación **real** del pod `main-app` y actualiza `self.current_node`. Este es el paso más importante para la robustez del agente.
-  2.  **Observación Externa**: Lanza consultas concurrentes a la API de Prometheus para obtener las métricas de CPU de los nodos y la QoS de la aplicación.
-- **Información que produce**: Actualiza `self.knowledge['nodes_cpu']` y `self.knowledge['qos']`.
-- **Ejecuciones externas**:
-  - `kubectl` (a través de la librería de Python) para listar pods.
-  - Peticiones HTTP a la API de Prometheus.
+### What `ClusterAgent.setup()` initializes
 
-### `AnalyzeBehaviour` (Analyze)
-- **Tipo**: `PeriodicBehaviour` (se ejecuta cada 15 segundos).
-- **Objetivo**: **Decidir si se debe actuar**. Es el "cerebro" del agente.
-- **¿Qué hace?**:
-  1.  Lee el estado actual del mundo desde `self.knowledge` y `self.current_node`.
-  2.  Aplica la política de decisión definida:
-      - **Si está en `r3-node`**: Comprueba si la QoS ha caído por debajo del `qos_threshold`.
-      - **Si está en `vm1node`**: Comprueba si la CPU de `r3-node` ha bajado del `return_cpu_threshold`.
-  3.  Si alguna de las condiciones se cumple, decide iniciar una migración.
-- **Información que produce**: Si decide migrar, escribe el nodo de destino en `self.knowledge['target_node']` y activa el `PlanBehaviour`. También pone el "lock" `self.migration_in_flight` a `True`.
-- **Ejecuciones externas**: Ninguna. Es un proceso de lógica puramente interno.
+| Variable | Type | Purpose |
+|---|---|---|
+| `self.knowledge` | `dict` | Short-term memory with the latest observations of the environment. |
+| `self.knowledge['nodes_cpu']` | `dict` | CPU usage per node, e.g. `{'r3-node': 85.1, 'vm1node': 44.2}`. |
+| `self.knowledge['qos']` | number | Current value of the `main_app_qos` metric. |
+| `self.knowledge['target_node']` | `str` | Node chosen for the next migration. Written by Analyze, read by Plan. |
+| `self.current_node` | `str` | The agent's **belief** about where the application currently runs. Starts as `"unknown"`; Monitor verifies and corrects it every cycle. |
+| `self.migration_in_flight` | `bool` | A lock. Set to `True` when a migration starts and to `False` when it ends, so a new migration cannot start while another one is in progress. |
 
-### `PlanBehaviour` (Plan)
-- **Tipo**: `OneShotBehaviour` (se ejecuta una sola vez cuando es llamado).
-- **Objetivo**: **Preparar la ejecución de la acción**. En nuestra arquitectura actual, es un paso de transición muy simple.
-- **¿Qué hace?**:
-  1.  Lee el `target_node` desde `self.knowledge`.
-  2.  Activa inmediatamente el `ExecuteBehaviour`.
-- **Información que produce**: Ninguna. Actúa como un simple intermediario.
-- **Ejecuciones externas**: Ninguna.
+Configuration parameters such as `prometheus_url`, `namespace` and `deployment_to_migrate` are also set here.
 
-### `ExecuteBehaviour` (Execute)
-- **Tipo**: `OneShotBehaviour`.
-- **Objetivo**: **Actuar sobre el entorno**. Son los "brazos" del agente.
-- **¿Qué hace?**:
-  1.  Lee el `target_node` desde `self.knowledge`.
-  2.  Construye y ejecuta el comando `kubectl patch deployment ...` para cambiar el `nodeSelector` del `Deployment` de `main-app`. Esta es la acción que provoca la migración.
-- **Información que produce**: Al finalizar (con éxito o fracaso), resetea el "lock" `self.migration_in_flight` a `False`, permitiendo que el `AnalyzeBehaviour` pueda tomar nuevas decisiones.
-- **Ejecuciones externas**:
-  - `kubectl` (a través de la librería de Python) para modificar un recurso del clúster.
+> **Note on decision parameters.** Earlier versions of the agent kept the decision thresholds (`qos_threshold`, `return_cpu_threshold`) directly in the agent. The decision logic now lives in the pluggable policies described in the README. <!-- TODO: confirm which parameters are still defined in the agent and which moved into the policies. -->
 
 ---
 
-## 3. Flujo de Información y Control
+## 2. Behaviours
 
-El flujo es un ciclo continuo orquestado por SPADE:
+The MAPE cycle is implemented as a set of SPADE behaviours that communicate through the agent's memory.
 
-1.  El **`MonitorBehaviour`** se ejecuta periódicamente, actualizando la memoria (`self.knowledge`) con datos frescos del clúster.
-2.  El **`AnalyzeBehaviour`** se ejecuta periódicamente, leyendo esa memoria.
-3.  Si el `AnalyzeBehaviour` decide actuar, **pasa el control** añadiendo el **`PlanBehaviour`** a la cola de ejecución del agente.
-4.  El **`PlanBehaviour`** se ejecuta una vez e inmediatamente **pasa el control** al **`ExecuteBehaviour`**.
-5.  El **`ExecuteBehaviour`** realiza la acción externa y, al terminar, libera el "lock" `migration_in_flight`.
-6.  El ciclo vuelve a empezar, con el `Monitor` y el `Analyze` ejecutándose periódicamente hasta que se cumpla la siguiente condición para actuar.
+### Monitor
+
+| | |
+|---|---|
+| **Type** | `PeriodicBehaviour`, every 15 seconds |
+| **Goal** | Perceive the state of the world. These are the agent's senses. |
+| **Produces** | Updates `knowledge['nodes_cpu']` and `knowledge['qos']`. |
+| **External calls** | Kubernetes API (list pods); HTTP requests to the Prometheus API. |
+
+What it does:
+
+1. **Self-location.** Queries the Kubernetes API for the *real* location of the `main-app` pod and updates `self.current_node`. This is the most important step for robustness: the agent never trusts an outdated belief.
+2. **External observation.** Sends concurrent queries to Prometheus for node CPU and application QoS.
+3. **Policy watch.** Checks `policy.conf` and hot-swaps the active policy when the filename changes (see the README). <!-- TODO: confirm this check lives in MonitorBehaviour, as the README states. -->
+
+### Analyze
+
+| | |
+|---|---|
+| **Type** | `PeriodicBehaviour`, every 15 seconds |
+| **Goal** | Decide whether to act. This is the agent's brain. |
+| **Produces** | If a migration is needed: `knowledge['target_node']`, the `migration_in_flight` lock set to `True`, and the Plan behaviour scheduled. |
+| **External calls** | None. Pure internal logic. |
+
+What it does:
+
+1. Reads the current state from `self.knowledge` and `self.current_node`.
+2. Passes it to the **active policy**, which decides whether to migrate and where.
+3. If the policy says to migrate, takes the lock, records the target and hands control to Plan.
+
+As an example of the kind of rule a policy can express, the original threshold-based logic worked like this:
+
+- On `r3-node`: migrate if QoS drops below `qos_threshold`.
+- On `vm1node`: migrate back if the CPU of `r3-node` falls below `return_cpu_threshold`.
+
+### Plan
+
+| | |
+|---|---|
+| **Type** | `OneShotBehaviour`, runs once when scheduled |
+| **Goal** | Prepare the action. In the current design it is a thin transition step. |
+| **Produces** | Nothing. It acts as an intermediary. |
+| **External calls** | None. |
+
+It reads `target_node` from the knowledge base and immediately schedules Execute.
+
+### Execute
+
+| | |
+|---|---|
+| **Type** | `OneShotBehaviour` |
+| **Goal** | Act on the environment. These are the agent's hands. |
+| **Produces** | Releases the `migration_in_flight` lock when it finishes, whether it succeeded or failed. |
+| **External calls** | Kubernetes API, to modify a cluster resource. |
+
+It reads `target_node`, then builds and runs the equivalent of `kubectl patch deployment ...` to change the `nodeSelector` of the `main-app` Deployment. Changing the selector is what triggers the migration.
+
+---
+
+## 3. Information and control flow
+
+```mermaid
+flowchart TD
+    MON["Monitor<br/>(every 15 s)"] -- "writes" --> KB[("Knowledge")]
+    KB -- "reads" --> ANA["Analyze<br/>(every 15 s)"]
+    ANA -- "migrate? (active policy)" --> DEC{{"Migration needed?"}}
+    DEC -- "no" --> MON
+    DEC -- "yes: set target + take lock" --> PLAN["Plan<br/>(one-shot)"]
+    PLAN --> EXE["Execute<br/>(one-shot)"]
+    EXE -- "patch nodeSelector" --> K8S["Kubernetes"]
+    EXE -- "release lock" --> MON
+```
+
+1. **Monitor** runs periodically and refreshes the knowledge base with fresh cluster data.
+2. **Analyze** runs periodically and reads that knowledge.
+3. If Analyze decides to act, it hands control to **Plan** by scheduling it.
+4. **Plan** runs once and immediately hands control to **Execute**.
+5. **Execute** performs the external action and releases the `migration_in_flight` lock.
+6. The cycle continues, with Monitor and Analyze running until the next condition to act is met.
+
+## 4. Design notes
+
+- **Verify, don't assume.** Monitor re-reads the pod's real location every cycle, so the agent recovers from external changes and failed migrations.
+- **One migration at a time.** The `migration_in_flight` lock prevents overlapping actions, and Execute always releases it, even on failure.
+- **Mechanism and policy are separate.** The MAPE machinery is fixed; the decision logic is a replaceable policy. That separation is what makes runtime switching and fair comparison possible.
