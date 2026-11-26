@@ -143,7 +143,7 @@ python experiments/test_runner_agent.py \
 
 ## Related projects
 
-- [MLSysOps](https://www.youtube.com/@mlsysopsproject) <!-- TODO: confirm URL --> : the Horizon Europe project this work was developed in.
+- [MLSysOps](https://mlsysops.eu/) <!-- TODO: confirm URL --> : the Horizon Europe project this work was developed in.
 
 ## Citation
 
