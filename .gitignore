@@ -30,3 +30,6 @@ Thumbs.db
 /*.docx
 /*.png
 /tests/char*
+# Credentials: never commit
+Cluster/kubeconfig
+*.kubeconfig
